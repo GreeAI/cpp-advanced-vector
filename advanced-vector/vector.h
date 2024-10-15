@@ -117,15 +117,18 @@ public:
                 Vector crhs(rhs);
                 Swap(crhs);
             }
-            else if (rhs.size_ < size_) {
-                std::copy(rhs.data_.GetAddress(), rhs.data_.GetAddress() + rhs.size_, data_.GetAddress());
-                std::destroy_n(data_.GetAddress() + rhs.size_, size_ - rhs.size_);
+            else {
+                size_t new_size = std::min(size_, rhs.size_);
+                std::copy(rhs.data_.GetAddress(), rhs.data_.GetAddress() + new_size, data_.GetAddress());
+
+                if (rhs.size_ < size_) {
+                    std::destroy_n(data_.GetAddress() + new_size, size_ - new_size);
+                }
+                else if (rhs.size_ > size_) {
+                    std::uninitialized_copy_n(rhs.data_.GetAddress() + size_, rhs.size_ - size_, data_.GetAddress() + size_);
+                }
+                size_ = rhs.size_;
             }
-            else if (rhs.size_ > size_) {
-                std::copy(rhs.data_.GetAddress(), rhs.data_.GetAddress() + size_, data_.GetAddress());
-                std::uninitialized_copy_n(rhs.data_.GetAddress() + size_, rhs.size_ - size_, data_.GetAddress() + size_);
-            }
-            size_ = rhs.size_;
         }
         return *this;
     }
@@ -197,22 +200,7 @@ public:
     }
     template <typename Total>
     void PushBack(Total&& value) {
-        if (size_ < data_.Capacity()) {
-            new (data_ + size_) T(std::forward<Total>(value));
-        }
-        else {
-            RawMemory<T> new_data(size_ == 0 ? 1 : size_ * 2);
-            new (new_data + size_) T(std::forward<Total>(value));
-            if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
-                std::uninitialized_move_n(data_.GetAddress(), size_, new_data.GetAddress());
-            }
-            else {
-                std::uninitialized_copy_n(data_.GetAddress(), size_, new_data.GetAddress());
-            }
-            std::destroy_n(data_.GetAddress(), size_);
-            data_.Swap(new_data);
-        }
-        ++size_;
+        EmplaceBack(std::forward<Total>(value));
     }
 
     template <typename... Args>
@@ -266,28 +254,47 @@ public:
             data_[index] = std::move(tmp);
         }
         else {
-            RawMemory<T> new_data(size_ == 0 ? 1 : size_ * 2);
-            new (new_data + index) T(std::forward<Args>(args)...);
             if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
-                std::uninitialized_move_n(begin(), index, new_data.GetAddress());
-                std::uninitialized_move_n(begin() + index, size_ - index, new_data.GetAddress() + index + 1);
+                ReallocateWithMove(index, std::forward<Args>(args)...);
             }
             else {
-                try {
-                    std::uninitialized_copy_n(begin(), index, new_data.GetAddress());
-                    std::uninitialized_copy_n(begin() + index, size_ - index, new_data.GetAddress() + index + 1);
-                }
-                catch (...) {
-                    std::destroy_n(new_data.GetAddress() + index, 1);
-                    throw;
-                }
+                ReallocateWithCopy(index, std::forward<Args>(args)...);
             }
-            std::destroy_n(begin(), size_);
-            data_.Swap(new_data);
         }
         ++size_;
         return begin() + index;
     }
+
+    template <typename... Args>
+    void ReallocateWithCopy(size_t index, Args&&... args) {
+        RawMemory<T> new_data(size_ == 0 ? 1 : size_ * 2);
+        new (new_data + index) T(std::forward<Args>(args)...);
+
+        try {
+            std::uninitialized_copy_n(begin(), index, new_data.GetAddress());
+            std::uninitialized_copy_n(begin() + index, size_ - index, new_data.GetAddress() + index + 1);
+        }
+        catch (...) {
+            std::destroy_n(new_data.GetAddress() + index, 1);
+            throw;
+        }
+
+        std::destroy_n(begin(), size_);
+        data_.Swap(new_data);
+    }
+
+    template <typename... Args>
+    void ReallocateWithMove(size_t index, Args&&... args) {
+        RawMemory<T> new_data(size_ == 0 ? 1 : size_ * 2);
+        new (new_data + index) T(std::forward<Args>(args)...);
+
+        std::uninitialized_move_n(begin(), index, new_data.GetAddress());
+        std::uninitialized_move_n(begin() + index, size_ - index, new_data.GetAddress() + index + 1);
+
+        std::destroy_n(begin(), size_);
+        data_.Swap(new_data);
+    }
+
     iterator Erase(const_iterator pos) /*noexcept(std::is_nothrow_move_assignable_v<T>)*/ {
         iterator it_pos = const_cast<iterator>(pos);
         std::move(it_pos + 1, end(), it_pos);
